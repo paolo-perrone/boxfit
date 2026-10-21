@@ -1,0 +1,3 @@
+# boxfit workload file, not a captured log: one request with the shape of NVIDIA's
+# DGX Spark Reviewer's Guide (August 2026) measurement of Qwen3.6 35B A3B at 2k context.
+prompt_tokens=2048 output_tokens=256

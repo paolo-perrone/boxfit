@@ -1,0 +1,11 @@
+# boxfit workload file, not a captured log. The loader lines state what llama.cpp prints
+# for the ggml-org gpt-oss-120b-MXFP4.gguf file (sizes and tensor types read from its
+# header); the request lines are the issue's agent scenario: about 30k tokens of
+# repository context re-sent every turn, a 500-token answer, 200 turns a day.
+print_info: file type   = MXFP4 MoE
+print_info: file size   = 59.02 GiB (4.34 BPW)
+llama_model_loader: - type  f32:  433 tensors
+llama_model_loader: - type q8_0:  146 tensors
+llama_model_loader: - type mxfp4:  108 tensors
+prompt_tokens=30000 output_tokens=500
+prompt_tokens=30000 output_tokens=500

@@ -1,5 +1,12 @@
 # boxfit
 
+> **Status:** `test_boxfit.py` passes, and CI reruns it plus the issue's coding-agent example on
+> Python 3.9 and 3.12 on every push. A fresh clone runs on stock `python3`. Checked against one
+> measured run (NVIDIA's Qwen3.6 35B A3B on a DGX Spark, below). The M5 Ultra row is a projection.
+> Not yet run on a reader's own log beyond the two in `examples/`.
+
+Companion to [Mac Studio vs DGX Spark vs RTX 5090](https://theaiengineer.substack.com/), The AI Engineer.
+
 Measure the computer you own today on the model you want, and boxfit prints what each
 desk computer would do with that model: whether it fits, the seconds before the first
 token, and the tokens per second after it.
@@ -14,6 +21,13 @@ machine you run today (Ollama `--verbose` output, Ollama's `server.log`, a llama
 
 ```
 python3 boxfit.py config.json my-run.log
+```
+
+On the known case in `examples/`, one 2,048-token request to Qwen3.6 35B A3B, it prints:
+
+```
+box                        fits          first token   tokens/s     own/yr     rent/yr   
+DGX Spark 128GB            yes           0.5 s         88.2         $2,360     $0        
 ```
 
 It prints, per box, whether the model fits, the seconds before the first token, the

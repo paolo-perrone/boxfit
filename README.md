@@ -110,6 +110,34 @@ spills: plain layer split on the host that ran 3.4 tokens/s, with the range a fa
 own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy hours at the listed hourly rate
 ```
 
+The issue follows that agent through one session with the prefix cache on, the default in
+llama.cpp's server, Ollama and `mlx_lm.server`: a cold first turn reads all 30,000 tokens,
+and each of the 20 turns after it reads only its 1,200 new ones. On the issue's 3 computers:
+
+```
+python3 boxfit.py examples/gpt-oss-120b.config.json examples/gpt-oss-120b-session.log --requests-per-day 200 --only 5090,m5max,spark
+```
+
+It prints, on 2026-10-24:
+
+```
+boxfit 0.1 | examples/gpt-oss-120b.config.json: 116.8B params, 5.1B active, MoE 4 of 128 experts, 3.56 GB read per token at empty context
+quantization: log: mxfp4 experts, q8_0 dense
+workload: 21 request(s) in the log, median 1,200 prompt tokens and 500 generated; 200 a day (--requests-per-day)
+prefix cache: 28,800 tokens already in context on a typical request; the read skips them, memory and decode carry them
+
+box                        fits          first token   tokens/s     own/yr     rent/yr   
+RTX 5090 32GB              no (67GB)     2.9 s         2.4 (6-28)   $4,470     $2,970    
+Mac Studio M5 Max 128GB    yes           0.5 s         67.6         $1,820     -         
+DGX Spark 128GB            yes           0.7 s         44.0         $2,370     $180      
+
+does not fit: RTX 5090 32GB needs 67GB and holds 31, so it spills to 2.4 tokens/s
+  with experts offloaded: 5.5 to 28.4 tokens/s, set by your system RAM and CPU
+fits: weights + KV cache at 30,500 tokens + 2.7 GB buffers, against memory the box gives the GPU by default
+spills: plain layer split on the host that ran 3.4 tokens/s, with the range a faster host or --n-cpu-moe reaches
+own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy hours at the listed hourly rate
+```
+
 ## Limits, stated
 
 - One request at a time. Batched serving multiplies aggregate throughput and boxfit

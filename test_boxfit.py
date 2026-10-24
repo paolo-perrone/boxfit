@@ -168,6 +168,40 @@ Peak memory: 64.408 GB
         self.assertEqual(len(w.requests), 2)
 
 
+class PrefixCache(unittest.TestCase):
+    """A warm turn reads only its new tokens but carries the whole context (2026-10-24)."""
+
+    def setUp(self):
+        self.m = bf.Model(cfg("gpt-oss-120b.config.json"))
+        self.cal = bf.calibrate()
+
+    def run_(self, prompt, cached, key="spark"):
+        return bf.predict(self.m, bf.REF_BITS, 1.0, prompt, 500, self.cal, key, cached)
+
+    def test_warm_turn_reads_only_new_tokens(self):
+        cold, warm = self.run_(30000, 0), self.run_(1200, 28800)
+        self.assertLess(warm["ttft"], cold["ttft"] / 10)
+
+    def test_warm_turn_carries_the_whole_context(self):
+        cold, warm, short = self.run_(30000, 0), self.run_(1200, 28800), self.run_(1200, 0)
+        self.assertAlmostEqual(warm["need_gb"], cold["need_gb"], places=6)
+        self.assertAlmostEqual(warm["tps"], cold["tps"], places=6)
+        self.assertLess(warm["tps"], short["tps"])          # more cache to read every step
+        self.assertGreater(warm["need_gb"], short["need_gb"])
+
+    def test_workload_line_carries_cached_tokens(self):
+        w = bf.parse_log("cached_tokens=28800 prompt_tokens=1200 output_tokens=500\nprompt_tokens=30000 output_tokens=500\n")
+        self.assertEqual([r.get("cached") for r in w.requests], [28800.0, 0.0])
+
+    def test_session_example_runs(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = bf.main([os.path.join(EX, "gpt-oss-120b.config.json"), os.path.join(EX, "gpt-oss-120b-session.log"),
+                          "--requests-per-day", "200", "--only", "spark"])
+        self.assertEqual(rc, 0)
+        self.assertIn("prefix cache: 28,800 tokens", buf.getvalue())
+
+
 class EndToEnd(unittest.TestCase):
     def test_cli_runs_and_names_every_box(self):
         buf = io.StringIO()

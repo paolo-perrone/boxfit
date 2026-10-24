@@ -257,9 +257,12 @@ def parse_log(text):
             w.add(prompt=p, gen=g, prompt_tps=p / (pms / 1e3) if pms else None,
                   gen_tps=g / (gms / 1e3) if gms else None)
 
-    # a plain workload line, for readers without a log: prompt_tokens=30000 output_tokens=500
-    for a in re.finditer(r"prompt_tokens\s*=\s*" + _num + r"\s+output_tokens\s*=\s*" + _num, text):
-        w.add(prompt=_f(a.group(1)), gen=_f(a.group(2)), prompt_tps=None, gen_tps=None)
+    # a plain workload line, for readers without a log: prompt_tokens=30000 output_tokens=500, with an
+    # optional cached_tokens=N in front: tokens already in context from the prefix cache, which the
+    # read skips but memory and every decode step still carry
+    for a in re.finditer(r"(?:cached_tokens\s*=\s*" + _num + r"\s+)?prompt_tokens\s*=\s*" + _num + r"\s+output_tokens\s*=\s*" + _num, text):
+        w.add(prompt=_f(a.group(2)), gen=_f(a.group(3)), prompt_tps=None, gen_tps=None,
+              cached=_f(a.group(1)) if a.group(1) else 0.0)
 
     # mlx_lm.generate --verbose
     for a in re.finditer(r"Prompt:\s*" + _num + r"\s*tokens,\s*" + _num + r"\s*tokens-per-sec\s*\n\s*Generation:\s*"
@@ -398,10 +401,15 @@ def calibrate():
 
 # ----------------------------------------------------------------------------- predict
 
-def predict(model, bits, scale, prompt, gen, cal, key):
+def predict(model, bits, scale, prompt, gen, cal, key, cached=0.0):
+    """`prompt` is the tokens the read processes; `cached` the tokens already in context from the
+    prefix cache. The read pays for the new tokens only, each attending to everything before it;
+    memory and every decode step carry the whole context. 2026-10-24: with cached=0 a session's warm
+    turn looked like a short conversation, so decode read too little cache and fit needed too little
+    memory, and llama.cpp and Ollama logs report only the uncached tokens."""
     b = BOXES[key]
     c = cal[key]
-    ctx = prompt + gen
+    ctx = cached + prompt + gen
     need = weights_bytes(model, bits) * scale + model.kv_read_bytes(ctx) + OVERHEAD_GB * GB
     usable = b["usable"] * GB
     out = dict(key=key, name=b["name"], need_gb=need / GB, usable_gb=b["usable"], projected=b.get("projected", False))
@@ -411,9 +419,9 @@ def predict(model, bits, scale, prompt, gen, cal, key):
     mm = model.mm_flops_per_token()
     ad = model.attn_flops_per_depth()
     if fits or tuned:
-        tm = (mm + model.sliding_attn_flops(prompt)) / c["fm"]
-        ttft = prompt * tm + (ad / c["fa"]) * prompt * prompt / 2
-        bpt = bytes_per_token(model, bits, prompt + gen / 2, scale)
+        tm = (mm + model.sliding_attn_flops(cached + prompt)) / c["fm"]
+        ttft = prompt * tm + (ad / c["fa"]) * (prompt * cached + prompt * prompt / 2)
+        bpt = bytes_per_token(model, bits, cached + prompt + gen / 2, scale)
         tps = c["eff"] * b["bw"] * GB / bpt
         out.update(ttft=ttft, tps=tps, tps_range=None, bytes_per_token=bpt, how="fits")
     elif b["kind"] == "gpu":
@@ -422,7 +430,7 @@ def predict(model, bits, scale, prompt, gen, cal, key):
         w_total = weights_bytes(model, bits) * scale
         gpu_room = max(usable - model.kv_read_bytes(ctx) - OVERHEAD_GB * GB, 1.0)
         frac_cpu = max(0.0, min(1.0, 1 - gpu_room / w_total))
-        bpt = bytes_per_token(model, bits, prompt + gen / 2, scale)
+        bpt = bytes_per_token(model, bits, cached + prompt + gen / 2, scale)
 
         def rate(cpu_bytes, sys_bw):
             return 1.0 / ((bpt - cpu_bytes) / gpu_rate + cpu_bytes / sys_bw)
@@ -439,7 +447,8 @@ def predict(model, bits, scale, prompt, gen, cal, key):
         pp = s["prefill_tps"] * s["prefill_cpu_resident"] / max(w_total * frac_cpu, 1.0)
         # the anchor scales by bytes left in system memory; the card still does every matmul,
         # so the first token never comes sooner than its own compute allows
-        compute = prompt * (mm + model.sliding_attn_flops(prompt)) / c["fm"] + (ad / c["fa"]) * prompt * prompt / 2
+        compute = (prompt * (mm + model.sliding_attn_flops(cached + prompt)) / c["fm"]
+                   + (ad / c["fa"]) * (prompt * cached + prompt * prompt / 2))
         out.update(ttft=max(prompt / pp, compute), tps=plain, tps_range=rng, range_how=how_rng, bytes_per_token=bpt,
                    how="spills", frac_cpu=frac_cpu)
     else:
@@ -475,6 +484,9 @@ def main(argv=None):
     ap.add_argument("--only", default="", help="comma list of boxes: 5090,pro6000,m5max,m5ultra,spark,spark64")
     ap.add_argument("--quant", default="", help="override: " + ", ".join(PRESETS))
     ap.add_argument("--requests-per-day", type=float, default=None)
+    ap.add_argument("--cached", type=float, default=None,
+                    help="tokens already in context from the prefix cache on a typical request (llama.cpp and "
+                         "Ollama logs count only the uncached prompt tokens)")
     ap.add_argument("--years", type=float, default=3.0, help="years you keep the box (default 3)")
     ap.add_argument("--kwh", type=float, default=0.17, help="electricity price per kWh (default 0.17, assumed)")
     ap.add_argument("--explain", action="store_true", help="print the arithmetic behind every row")
@@ -523,6 +535,7 @@ def main(argv=None):
     reqs = w.requests
     prompt = statistics.median(r["prompt"] for r in reqs)
     gen = statistics.median(r["gen"] for r in reqs)
+    cached = a.cached if a.cached is not None else statistics.median(r.get("cached", 0.0) for r in reqs)
     if a.requests_per_day:
         per_day, per_day_note = a.requests_per_day, "--requests-per-day"
     elif len(w.times) >= 2:
@@ -537,7 +550,7 @@ def main(argv=None):
     for k in keys:
         if k not in BOXES:
             sys.exit("boxfit: unknown box %r (choose from %s)" % (k, ", ".join(BOXES)))
-        o = predict(model, bits, scale, prompt, gen, cal, k)
+        o = predict(model, bits, scale, prompt, gen, cal, k, cached)
         o["year"] = yearly(o, gen, per_day, a.years, a.kwh)
         rows.append(o)
 
@@ -545,7 +558,7 @@ def main(argv=None):
     if a.json:
         print(json.dumps(dict(model=dict(total_params=model.total_params, active_params=model.active_params,
                                          bits=bits, scale=scale),
-                              workload=dict(prompt=prompt, gen=gen, per_day=per_day), rows=rows), indent=1,
+                              workload=dict(prompt=prompt, gen=gen, cached=cached, per_day=per_day), rows=rows), indent=1,
                          default=str))
         return 0
 
@@ -556,6 +569,9 @@ def main(argv=None):
     print("quantization: %s%s" % (why, " (scaled x%.3f to the log's file size)" % scale if abs(scale - 1) > 0.005 else ""))
     print("workload: %d request(s) in the log, median %s prompt tokens and %s generated; %.0f a day (%s)" % (
         len(reqs), "{:,}".format(int(prompt)), "{:,}".format(int(gen)), per_day, per_day_note))
+    if cached:
+        print("prefix cache: %s tokens already in context on a typical request; the read skips them, memory "
+              "and decode carry them" % "{:,}".format(int(cached)))
     if today:
         pt = statistics.median(r["prompt_tps"] for r in today)
         gt = statistics.median(r["gen_tps"] for r in today)
@@ -582,7 +598,7 @@ def main(argv=None):
         elif o["how"] == "does not fit":
             print("does not fit: %s needs %.0fGB and holds %.0f" % (o["name"], o["need_gb"], o["usable_gb"]))
     print("fits: weights + KV cache at %s tokens + %.1f GB buffers, against memory the box gives the GPU by default" % (
-        "{:,}".format(int(prompt + gen)), OVERHEAD_GB))
+        "{:,}".format(int(cached + prompt + gen)), OVERHEAD_GB))
     if any(o["how"] == "spills" for o in rows):
         print("spills: plain layer split on the host that ran 3.4 tokens/s, with the range a faster host or --n-cpu-moe reaches")
     if any(o["projected"] for o in rows):

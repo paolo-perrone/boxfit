@@ -114,8 +114,12 @@ own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy ho
 
 - One request at a time. Batched serving multiplies aggregate throughput and boxfit
   does not model it.
-- Prefill assumes no prefix cache: the prompt tokens your log reports are the tokens
-  that get processed. Ollama and llama.cpp already report only the uncached tokens.
+- The prefix cache: the prompt tokens your log reports are the tokens the read processes,
+  and Ollama and llama.cpp report only the uncached ones. Pass `--cached N`, the tokens
+  already in context on a typical turn (or write `cached_tokens=N` before a workload line),
+  and boxfit keeps them in memory and in every decode step while the read skips them.
+  `examples/gpt-oss-120b-session.log` is one coding session: a cold first turn, then turns
+  that read only their new tokens.
 - The M5 Ultra row is a projection from the M5 Max. MacStories measured an M5 Ultra in
   September 2026 on other models; no published run uses the calibration model, gpt-oss-120b.
 - A model that does not fit a box gets a spill estimate built from measured

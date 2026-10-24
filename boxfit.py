@@ -12,6 +12,7 @@ Standard library only. No GPU, no network, no API key. Tested 2026-09-28.
 """
 import argparse
 import json
+import os
 import re
 import statistics
 import sys
@@ -436,7 +437,10 @@ def predict(model, bits, scale, prompt, gen, cal, key):
         else:
             rng, how_rng = (plain, rate(plain_cpu, s["bw_high"])), "a faster host"
         pp = s["prefill_tps"] * s["prefill_cpu_resident"] / max(w_total * frac_cpu, 1.0)
-        out.update(ttft=prompt / pp, tps=plain, tps_range=rng, range_how=how_rng, bytes_per_token=bpt,
+        # the anchor scales by bytes left in system memory; the card still does every matmul,
+        # so the first token never comes sooner than its own compute allows
+        compute = prompt * (mm + model.sliding_attn_flops(prompt)) / c["fm"] + (ad / c["fa"]) * prompt * prompt / 2
+        out.update(ttft=max(prompt / pp, compute), tps=plain, tps_range=rng, range_how=how_rng, bytes_per_token=bpt,
                    how="spills", frac_cpu=frac_cpu)
     else:
         out.update(ttft=None, tps=None, tps_range=None, bytes_per_token=None, how="does not fit")
@@ -477,9 +481,14 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
-    with open(a.config, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-    model = Model(cfg, name=_get(cfg, "_name_or_path", default=a.config))
+    try:
+        with open(a.config, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        model = Model(cfg, name=_get(cfg, "_name_or_path", default=a.config))
+    except (OSError, ValueError) as e:
+        sys.exit("boxfit: cannot read %s as a model's config.json: %s" % (a.config, e))
+    if not os.path.isfile(a.log):
+        sys.exit("boxfit: no log at %s" % a.log)
     with open(a.log, encoding="utf-8", errors="replace") as fh:
         w = parse_log(fh.read())
     if not w.requests:

@@ -1,15 +1,16 @@
 # boxfit
 
-> **Status:** `test_boxfit.py` passes, and CI reruns it plus the issue's coding-agent example on
-> Python 3.9 and 3.12 on every push. A fresh clone runs on stock `python3`. Checked against one
-> measured run (NVIDIA's Qwen3.6 35B A3B on a DGX Spark, below). The M5 Ultra row is a projection.
-> Not yet run on a reader's own log beyond the two in `examples/`.
-
-Companion to [Mac Studio vs DGX Spark vs RTX 5090](https://theaiengineer.substack.com/), The AI Engineer.
-
 Measure the computer you own today on the model you want, and boxfit prints what each
 desk computer would do with that model: whether it fits, the seconds before the first
 token, and the tokens per second after it.
+
+> **Status:** `test_boxfit.py` passes, and CI reruns it plus the issue's coding-agent example on
+> Python 3.9 and 3.12 on every push. A fresh clone runs on stock `python3`. Checked against one
+> measured run (NVIDIA's Qwen3.6 35B A3B on a DGX Spark, below). The M5 Ultra row is a projection.
+> Its log readers are tested on lines in each tool's documented format, and both logs in
+> `examples/` are hand-written workload files: no captured log has run through it yet.
+
+Companion to [Mac Studio vs DGX Spark vs RTX 5090](https://theaiengineer.substack.com/), The AI Engineer.
 
 For engineers pricing a desk machine for local inference, an RTX 5090, an RTX PRO 6000,
 a Mac Studio or a DGX Spark, who want to know which one their own workload stalls on

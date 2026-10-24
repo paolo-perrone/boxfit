@@ -100,6 +100,21 @@ class Predictions(unittest.TestCase):
         self.assertGreater(o["tps"], 101.8 * 0.85)
 
 
+    def test_a_spilling_card_is_never_faster_to_first_token_than_its_own_compute(self):
+        """A dense 70B at Q4_K_M spills off the 32GB RTX 5090. Weights in system memory only add
+        time: the card still does every matrix multiply, so its first token can't come sooner
+        than the same card's compute allows, nor sooner than the 96GB PRO 6000 that holds it."""
+        m = bf.Model(cfg("llama-3.3-70b.config.json"))
+        e, d, h = bf.PRESETS["q4_k_m"]
+        bits = dict(expert=e, dense=d, head=h)
+        spill = bf.predict(m, bits, 1.0, 2048, 256, self.cal, "5090")
+        fit = bf.predict(m, bits, 1.0, 2048, 256, self.cal, "pro6000")
+        self.assertEqual(spill["how"], "spills")
+        c = self.cal["5090"]
+        compute = 2048 * m.mm_flops_per_token() / c["fm"] + (m.attn_flops_per_depth() / c["fa"]) * 2048 * 2048 / 2
+        self.assertGreaterEqual(spill["ttft"], compute)
+        self.assertGreaterEqual(spill["ttft"], fit["ttft"])
+
 class LogParsing(unittest.TestCase):
     # Synthetic strings in each tool's documented output shape, not captured runs.
     OLLAMA = """total duration:       14.2s

@@ -1,5 +1,7 @@
 # boxfit
 
+![boxfit sizing gpt-oss-120b on six desk machines](assets/demo.gif)
+
 Measure the computer you own today on the model you want, and boxfit prints what each
 desk computer would do with that model: whether it fits, the seconds before the first
 token, and the tokens per second after it.

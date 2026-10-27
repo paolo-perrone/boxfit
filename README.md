@@ -26,6 +26,12 @@ machine you run today (Ollama `--verbose` output, Ollama's `server.log`, a llama
 python3 boxfit.py config.json my-run.log
 ```
 
+No local machine yet, only an API? Give the typical request's token counts instead of a log:
+
+```
+python3 boxfit.py config.json --prompt 30000 --gen 500 --requests-per-day 200
+```
+
 On the known case in `examples/`, one 2,048-token request to Qwen3.6 35B A3B, it prints:
 
 ```
@@ -157,7 +163,18 @@ own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy ho
   for experts offloaded to system memory (llama.cpp `--n-cpu-moe`), anchored on 8.1 and
   30 tokens per second from two hosts with the same card; your system RAM and CPU decide
   where you land. A plain layer split, 3.4 on the slower host, prints only as the setting
-  not to run.
+  not to run. To get one number for your own machine, time this model on your CPU alone
+  and pass the result:
+
+  ```
+  llama-bench -m model.gguf -ngl 0 -p 0 -n 128     # the tg128 row's tokens/s
+  python3 boxfit.py config.json my-run.log --cpu-tps 8
+  ```
+
+  A CPU-only decode reads every active byte from system memory, so its tokens per second
+  times the bytes per token is the bandwidth your RAM and CPU give a spill. Each
+  calibration host's figure reproduces its own end of the range (`test_boxfit.py`); no
+  reader's machine has run it yet.
 - Every box is calibrated on one sparse model. Dense models run their matrix
   multiplies more efficiently than a mixture of experts does, so for a dense model the
   first-token estimates run long; the decode estimates, set by memory, hold.

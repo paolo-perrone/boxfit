@@ -223,6 +223,58 @@ class SpillLeadsWithOffload(unittest.TestCase):
         self.assertIn("do not run a plain layer split", out)
 
 
+class CpuTps(unittest.TestCase):
+    """--cpu-tps turns the spill range into one number from the reader's own RAM and CPU."""
+
+    def setUp(self):
+        self.m = bf.Model(cfg("gpt-oss-120b.config.json"))
+        self.cal = bf.calibrate()
+
+    def test_each_calibration_host_reproduces_its_end_of_the_range(self):
+        rng = bf.predict(self.m, bf.REF_BITS, 1.0, 1200, 500, self.cal, "5090", 28800)
+        for bw, end in ((self.cal["spill"]["bw_low"], rng["tps"]), (self.cal["spill"]["bw_high"], rng["tps_hi"])):
+            one = bf.predict(self.m, bf.REF_BITS, 1.0, 1200, 500, self.cal, "5090", 28800, sys_bw=bw)
+            self.assertAlmostEqual(one["tps"], end, places=6)
+            self.assertIsNone(one["tps_hi"])
+
+    def test_cli_prints_one_number(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            bf.main([os.path.join(EX, "gpt-oss-120b.config.json"), os.path.join(EX, "gpt-oss-120b-session.log"),
+                     "--only", "5090", "--cpu-tps", "8"])
+        out = buf.getvalue()
+        self.assertIn("tokens/s on your RAM and CPU", out)
+        self.assertIn("(--cpu-tps)", out)
+        self.assertNotIn("set by your system RAM and CPU", out)
+
+
+class NoLog(unittest.TestCase):
+    """A reader with no local machine yet sizes a box from the typical request's token counts."""
+
+    def run_cli(self, *args):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            bf.main([os.path.join(EX, "gpt-oss-120b.config.json"), *args])
+        return buf.getvalue()
+
+    def test_token_counts_match_the_one_request_log(self):
+        # the agent log's median request is 30,000 prompt and 500 generated tokens
+        # with the same quantization the two agree within the log's file-size scaling
+        same = ("--quant", "mxfp4-moe", "--requests-per-day", "200", "--json")
+        flags = self.run_cli("--prompt", "30000", "--gen", "500", *same)
+        logged = self.run_cli(os.path.join(EX, "gpt-oss-120b-agent.log"), *same)
+        a, b = json.loads(flags)["rows"], json.loads(logged)["rows"]
+        for x, y in zip(a, b):
+            self.assertEqual(x["fits"], y["fits"])
+            if y["tps"]:
+                self.assertAlmostEqual(x["tps"] / y["tps"], 1.0, delta=0.05)
+
+    def test_missing_counts_exit_with_the_fix(self):
+        with self.assertRaises(SystemExit) as e:
+            self.run_cli("--prompt", "30000")
+        self.assertIn("--prompt and --gen", str(e.exception.code))
+
+
 class EndToEnd(unittest.TestCase):
     def test_cli_runs_and_names_every_box(self):
         buf = io.StringIO()

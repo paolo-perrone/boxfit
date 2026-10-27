@@ -9,7 +9,7 @@ token, and the tokens per second after it.
 > **Status:** `test_boxfit.py` passes, and CI reruns it plus the issue's coding-agent example on
 > Python 3.9 and 3.12 on every push. A fresh clone runs on stock `python3`. Checked against one
 > measured run (NVIDIA's Qwen3.6 35B A3B on a DGX Spark, below). The M5 Ultra row is a projection.
-> Its log readers are tested on lines in each tool's documented format, and both logs in
+> Its log readers are tested on lines in each tool's documented format, and the three logs in
 > `examples/` are hand-written workload files: no captured log has run through it yet.
 
 Companion to [Mac Studio vs DGX Spark vs RTX 5090](https://theaiengineer.substack.com/), The AI Engineer.
@@ -29,8 +29,8 @@ python3 boxfit.py config.json my-run.log
 On the known case in `examples/`, one 2,048-token request to Qwen3.6 35B A3B, it prints:
 
 ```
-box                        fits          first token   tokens/s     own/yr     rent/yr   
-DGX Spark 128GB            yes           0.5 s         88.2         $2,360     $0        
+box                        fits          first token   tokens/s     own/yr         rent/yr     
+DGX Spark 128GB            yes           0.5 s         88.2         $2,360         $0          
 ```
 
 It prints, per box, whether the model fits, the seconds before the first token, the
@@ -95,19 +95,19 @@ boxfit 0.1 | examples/gpt-oss-120b.config.json: 116.8B params, 5.1B active, MoE 
 quantization: log: mxfp4 experts, q8_0 dense
 workload: 2 request(s) in the log, median 30,000 prompt tokens and 500 generated; 200 a day (--requests-per-day)
 
-box                        fits          first token   tokens/s     own/yr     rent/yr   
-RTX 5090 32GB              no (67GB)     73 s          2.4 (6-28)   $4,630     $3,950    
-RTX PRO 6000 96GB          yes           6.6 s         176.1        $6,180     -         
-Mac Studio M5 Max 128GB    yes           12 s          67.6         $1,820     -         
-Mac Studio M5 Ultra 256GB * yes           5.9 s         132.1        $3,190     -         
-DGX Spark 128GB            yes           15 s          44.0         $2,380     $400      
-DGX Spark 64GB             no (67GB)     -             -            -          -         
+box                         fits          first token   tokens/s     own/yr         rent/yr     
+RTX 5090 32GB               no (67GB)     73 s          5.5-28.4     $4,190-4,360   $1,270-2,280
+RTX PRO 6000 96GB           yes           6.6 s         176.1        $6,180         -           
+Mac Studio M5 Max 128GB     yes           12 s          67.6         $1,820         -           
+Mac Studio M5 Ultra 256GB * yes           5.9 s         132.1        $3,190         -           
+DGX Spark 128GB             yes           15 s          44.0         $2,380         $400        
+DGX Spark 64GB              no (67GB)     -             -            -              -           
 
-does not fit: RTX 5090 32GB needs 67GB and holds 31, so it spills to 2.4 tokens/s
-  with experts offloaded: 5.5 to 28.4 tokens/s, set by your system RAM and CPU
+does not fit: RTX 5090 32GB needs 67GB and holds 31, so the experts go to system memory: 5.5 to 28.4 tokens/s, set by your system RAM and CPU
+  do not run a plain layer split: it spills to 2.4 tokens/s
 does not fit: DGX Spark 64GB needs 67GB and holds 60
 fits: weights + KV cache at 30,500 tokens + 2.7 GB buffers, against memory the box gives the GPU by default
-spills: plain layer split on the host that ran 3.4 tokens/s, with the range a faster host or --n-cpu-moe reaches
+spills: experts offloaded with llama.cpp --n-cpu-moe; on this model one RTX 5090 host measured 8.1 tokens/s and a faster one 30
 * projected from the M5 Max: the first M5 Ultra reviews (Sep 2026) measured other models, not this calibration model
 own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy hours at the listed hourly rate
 ```
@@ -120,7 +120,7 @@ and each of the 20 turns after it reads only its 1,200 new ones. On the issue's 
 python3 boxfit.py examples/gpt-oss-120b.config.json examples/gpt-oss-120b-session.log --requests-per-day 200 --only 5090,m5max,spark
 ```
 
-It prints, on 2026-10-24:
+It prints, on 2026-10-26:
 
 ```
 boxfit 0.1 | examples/gpt-oss-120b.config.json: 116.8B params, 5.1B active, MoE 4 of 128 experts, 3.56 GB read per token at empty context
@@ -128,15 +128,15 @@ quantization: log: mxfp4 experts, q8_0 dense
 workload: 21 request(s) in the log, median 1,200 prompt tokens and 500 generated; 200 a day (--requests-per-day)
 prefix cache: 28,800 tokens already in context on a typical request; the read skips them, memory and decode carry them
 
-box                        fits          first token   tokens/s     own/yr     rent/yr   
-RTX 5090 32GB              no (67GB)     2.9 s         2.4 (6-28)   $4,470     $2,970    
-Mac Studio M5 Max 128GB    yes           0.5 s         67.6         $1,820     -         
-DGX Spark 128GB            yes           0.7 s         44.0         $2,370     $180      
+box                        fits          first token   tokens/s     own/yr         rent/yr     
+RTX 5090 32GB              no (67GB)     2.9 s         5.5-28.4     $4,030-4,200   $290-1,310  
+Mac Studio M5 Max 128GB    yes           0.5 s         67.6         $1,820         -           
+DGX Spark 128GB            yes           0.7 s         44.0         $2,370         $180        
 
-does not fit: RTX 5090 32GB needs 67GB and holds 31, so it spills to 2.4 tokens/s
-  with experts offloaded: 5.5 to 28.4 tokens/s, set by your system RAM and CPU
+does not fit: RTX 5090 32GB needs 67GB and holds 31, so the experts go to system memory: 5.5 to 28.4 tokens/s, set by your system RAM and CPU
+  do not run a plain layer split: it spills to 2.4 tokens/s
 fits: weights + KV cache at 30,500 tokens + 2.7 GB buffers, against memory the box gives the GPU by default
-spills: plain layer split on the host that ran 3.4 tokens/s, with the range a faster host or --n-cpu-moe reaches
+spills: experts offloaded with llama.cpp --n-cpu-moe; on this model one RTX 5090 host measured 8.1 tokens/s and a faster one 30
 own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy hours at the listed hourly rate
 ```
 
@@ -153,8 +153,11 @@ own/yr: price over 3 years + electricity at $0.17/kWh; rent/yr: the same busy ho
 - The M5 Ultra row is a projection from the M5 Max. MacStories measured an M5 Ultra in
   September 2026 on other models; no published run uses the calibration model, gpt-oss-120b.
 - A model that does not fit a box gets a spill estimate built from measured
-  gpt-oss-120b spill runs on RTX 5090 hosts, and the spread between hosts is wide (3.4
-  to 30 tokens per second on the same card), so treat it as a range.
+  gpt-oss-120b spill runs on RTX 5090 hosts. A mixture of experts leads with the range
+  for experts offloaded to system memory (llama.cpp `--n-cpu-moe`), anchored on 8.1 and
+  30 tokens per second from two hosts with the same card; your system RAM and CPU decide
+  where you land. A plain layer split, 3.4 on the slower host, prints only as the setting
+  not to run.
 - Every box is calibrated on one sparse model. Dense models run their matrix
   multiplies more efficiently than a mixture of experts does, so for a dense model the
   first-token estimates run long; the decode estimates, set by memory, hold.

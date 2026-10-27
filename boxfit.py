@@ -449,8 +449,14 @@ def predict(model, bits, scale, prompt, gen, cal, key, cached=0.0):
         # so the first token never comes sooner than its own compute allows
         compute = (prompt * (mm + model.sliding_attn_flops(cached + prompt)) / c["fm"]
                    + (ad / c["fa"]) * (prompt * cached + prompt * prompt / 2))
-        out.update(ttft=max(prompt / pp, compute), tps=plain, tps_range=rng, range_how=how_rng, bytes_per_token=bpt,
-                   how="spills", frac_cpu=frac_cpu)
+        # 2026-10-26: a MoE model that spills leads with the experts-offloaded range, the setting an
+        # owner runs (llama.cpp --n-cpu-moe); the plain layer split stays only as a line not to run
+        if how_rng == "experts offloaded":
+            out.update(ttft=max(prompt / pp, compute), tps=rng[0], tps_hi=rng[1], plain=plain, tps_range=rng,
+                       range_how=how_rng, bytes_per_token=bpt, how="spills", frac_cpu=frac_cpu)
+        else:
+            out.update(ttft=max(prompt / pp, compute), tps=plain, tps_range=rng, range_how=how_rng, bytes_per_token=bpt,
+                       how="spills", frac_cpu=frac_cpu)
     else:
         out.update(ttft=None, tps=None, tps_range=None, bytes_per_token=None, how="does not fit")
     return out
@@ -466,7 +472,11 @@ def yearly(o, gen, per_day, years, kwh):
     energy = (b["load_w"] * busy_h + b["idle_w"] * (8760 - busy_h)) / 1000 * kwh
     own = b["price"] / years + energy
     rent = busy_h * b["rent"] if b["rent"] else None
-    return dict(busy_s=busy_s, busy_h=busy_h, own=own, rent=rent, energy=energy)
+    out = dict(busy_s=busy_s, busy_h=busy_h, own=own, rent=rent, energy=energy)
+    if o.get("tps_hi"):                      # the fast end of the offload range
+        hi = yearly(dict(o, tps=o["tps_hi"], tps_hi=None), gen, per_day, years, kwh)
+        out.update(own_lo=hi["own"], rent_lo=hi["rent"], busy_h_lo=hi["busy_h"])
+    return out
 
 
 # ----------------------------------------------------------------------------- report
@@ -578,21 +588,30 @@ def main(argv=None):
         print("your machine today: %s to first token, %.1f tokens per second" % (fmt_s(prompt / pt), gt))
     print()
     w = max(26, max(len(o["name"]) + (2 if o["projected"] else 0) for o in rows))
-    print("%-*s %-13s %-13s %-12s %-10s %-10s" % (w, "box", "fits", "first token", "tokens/s", "own/yr", "rent/yr"))
+    print("%-*s %-13s %-13s %-12s %-14s %-12s" % (w, "box", "fits", "first token", "tokens/s", "own/yr", "rent/yr"))
     for o in rows:
         y = o["year"]
         fits = o["fits"] if o["fits"] != "no" else "no (%.0fGB)" % o["need_gb"]
-        if o["how"] == "spills":
+        money = lambda v: "{:,}".format(int(round(v, -1)))
+        if o["how"] == "spills" and o.get("tps_hi"):
+            tps = "%.1f-%.1f" % (o["tps"], o["tps_hi"])
+        elif o["how"] == "spills":
             tps = "%.1f (%.0f-%.0f)" % (o["tps"], o["tps_range"][0], o["tps_range"][1]) if o["tps_range"][1] >= 10 else "%.1f (to %.1f)" % (o["tps"], o["tps_range"][1])
         else:
             tps = "%.1f" % o["tps"] if o["tps"] else "-"
         name = o["name"] + (" *" if o["projected"] else "")
-        own = "$%s" % "{:,}".format(int(round(y["own"], -1))) if y else "-"
-        rent = "$%s" % "{:,}".format(int(round(y["rent"], -1))) if (y and y["rent"] is not None) else "-"
-        print("%-*s %-13s %-13s %-12s %-10s %-10s" % (w, name, fits, fmt_s(o["ttft"]), tps, own, rent))
+        own = ("$%s-%s" % (money(y["own_lo"]), money(y["own"])) if y and "own_lo" in y
+               else "$%s" % money(y["own"]) if y else "-")
+        rent = ("$%s-%s" % (money(y["rent_lo"]), money(y["rent"])) if y and y.get("rent_lo") is not None
+                else "$%s" % money(y["rent"]) if (y and y["rent"] is not None) else "-")
+        print("%-*s %-13s %-13s %-12s %-14s %-12s" % (w, name, fits, fmt_s(o["ttft"]), tps, own, rent))
     print()
     for o in rows:
-        if o["how"] == "spills":
+        if o["how"] == "spills" and o.get("tps_hi"):
+            print("does not fit: %s needs %.0fGB and holds %.0f, so the experts go to system memory: %.1f to %.1f tokens/s, set by your system RAM and CPU" % (
+                o["name"], o["need_gb"], o["usable_gb"], o["tps"], o["tps_hi"]))
+            print("  do not run a plain layer split: it spills to %.1f tokens/s" % o["plain"])
+        elif o["how"] == "spills":
             print("does not fit: %s needs %.0fGB and holds %.0f, so it spills to %.1f tokens/s" % (
                 o["name"], o["need_gb"], o["usable_gb"], o["tps"]))
             print("  with %s: %.1f to %.1f tokens/s, set by your system RAM and CPU" % ((o["range_how"],) + tuple(o["tps_range"])))
@@ -600,7 +619,9 @@ def main(argv=None):
             print("does not fit: %s needs %.0fGB and holds %.0f" % (o["name"], o["need_gb"], o["usable_gb"]))
     print("fits: weights + KV cache at %s tokens + %.1f GB buffers, against memory the box gives the GPU by default" % (
         "{:,}".format(int(cached + prompt + gen)), OVERHEAD_GB))
-    if any(o["how"] == "spills" for o in rows):
+    if any(o["how"] == "spills" and o.get("tps_hi") for o in rows):
+        print("spills: experts offloaded with llama.cpp --n-cpu-moe; on this model one RTX 5090 host measured 8.1 tokens/s and a faster one 30")
+    elif any(o["how"] == "spills" for o in rows):
         print("spills: plain layer split on the host that ran 3.4 tokens/s, with the range a faster host or --n-cpu-moe reaches")
     if any(o["projected"] for o in rows):
         print("* projected from the M5 Max: the first M5 Ultra reviews (Sep 2026) measured other models, not this calibration model")

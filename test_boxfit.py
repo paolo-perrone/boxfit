@@ -202,6 +202,27 @@ class PrefixCache(unittest.TestCase):
         self.assertIn("prefix cache: 28,800 tokens", buf.getvalue())
 
 
+class SpillLeadsWithOffload(unittest.TestCase):
+    """A MoE model that spills leads with the experts-offloaded range; the plain split is only a
+    line not to run (2026-10-26)."""
+
+    def test_moe_spill_reports_offload_range(self):
+        m = bf.Model(cfg("gpt-oss-120b.config.json"))
+        o = bf.predict(m, bf.REF_BITS, 1.0, 1200, 500, bf.calibrate(), "5090", 28800)
+        self.assertEqual(o["how"], "spills")
+        self.assertGreater(o["tps"], o["plain"])
+        self.assertLess(o["tps"], o["tps_hi"])
+
+    def test_cli_names_the_plain_split_as_the_line_not_to_run(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            bf.main([os.path.join(EX, "gpt-oss-120b.config.json"), os.path.join(EX, "gpt-oss-120b-session.log"),
+                     "--requests-per-day", "200", "--only", "5090"])
+        out = buf.getvalue()
+        self.assertIn("the experts go to system memory", out)
+        self.assertIn("do not run a plain layer split", out)
+
+
 class EndToEnd(unittest.TestCase):
     def test_cli_runs_and_names_every_box(self):
         buf = io.StringIO()

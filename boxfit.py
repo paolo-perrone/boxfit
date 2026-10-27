@@ -5,7 +5,7 @@
 
 Reads a Hugging Face config.json and a log from the machine you run today (Ollama
 --verbose output or server.log, llama.cpp llama-server or llama-cli, mlx_lm.generate
---verbose), then prints per box: does the model fit, seconds to the first token,
+--verbose), or --prompt and --gen with no log, then prints per box: does the model fit, seconds to the first token,
 tokens per second, and a year of your use owned against rented.
 
 Standard library only. No GPU, no network, no API key. Tested 2026-09-28.
@@ -401,12 +401,14 @@ def calibrate():
 
 # ----------------------------------------------------------------------------- predict
 
-def predict(model, bits, scale, prompt, gen, cal, key, cached=0.0):
+def predict(model, bits, scale, prompt, gen, cal, key, cached=0.0, sys_bw=None):
     """`prompt` is the tokens the read processes; `cached` the tokens already in context from the
     prefix cache. The read pays for the new tokens only, each attending to everything before it;
     memory and every decode step carry the whole context. 2026-10-24: with cached=0 a session's warm
     turn looked like a short conversation, so decode read too little cache and fit needed too little
-    memory, and llama.cpp and Ollama logs report only the uncached tokens."""
+    memory, and llama.cpp and Ollama logs report only the uncached tokens. `sys_bw` is the bytes a
+    second the reader's own CPU pulls from system memory (--cpu-tps); a spill then gets one number
+    from it in place of the range between the two calibration hosts."""
     b = BOXES[key]
     c = cal[key]
     ctx = cached + prompt + gen
@@ -436,14 +438,15 @@ def predict(model, bits, scale, prompt, gen, cal, key, cached=0.0):
             return 1.0 / ((bpt - cpu_bytes) / gpu_rate + cpu_bytes / sys_bw)
 
         plain_cpu = bpt * frac_cpu
-        plain = rate(plain_cpu, s["bw_low"])
+        lo_bw, hi_bw = (sys_bw, sys_bw) if sys_bw else (s["bw_low"], s["bw_high"])
+        plain = rate(plain_cpu, lo_bw)
         exp_w = (model.expert_params + model.shared_params) * bits["expert"] / 8 * scale
         if exp_w and exp_w >= w_total - gpu_room:        # experts alone can leave the card
             moved = (w_total - gpu_room) / exp_w
             cpu_b = model.active_expert_params * bits["expert"] / 8 * scale * moved
-            rng, how_rng = (rate(cpu_b, s["bw_low"]), rate(cpu_b, s["bw_high"])), "experts offloaded"
+            rng, how_rng = (rate(cpu_b, lo_bw), rate(cpu_b, hi_bw)), "experts offloaded"
         else:
-            rng, how_rng = (plain, rate(plain_cpu, s["bw_high"])), "a faster host"
+            rng, how_rng = (plain, rate(plain_cpu, hi_bw)), "a faster host"
         pp = s["prefill_tps"] * s["prefill_cpu_resident"] / max(w_total * frac_cpu, 1.0)
         # the anchor scales by bytes left in system memory; the card still does every matmul,
         # so the first token never comes sooner than its own compute allows
@@ -452,11 +455,12 @@ def predict(model, bits, scale, prompt, gen, cal, key, cached=0.0):
         # 2026-10-26: a MoE model that spills leads with the experts-offloaded range, the setting an
         # owner runs (llama.cpp --n-cpu-moe); the plain layer split stays only as a line not to run
         if how_rng == "experts offloaded":
-            out.update(ttft=max(prompt / pp, compute), tps=rng[0], tps_hi=rng[1], plain=plain, tps_range=rng,
-                       range_how=how_rng, bytes_per_token=bpt, how="spills", frac_cpu=frac_cpu)
+            out.update(ttft=max(prompt / pp, compute), tps=rng[0], tps_hi=None if sys_bw else rng[1], plain=plain,
+                       tps_range=rng, range_how=how_rng, bytes_per_token=bpt, how="spills", frac_cpu=frac_cpu,
+                       measured=bool(sys_bw))
         else:
-            out.update(ttft=max(prompt / pp, compute), tps=plain, tps_range=rng, range_how=how_rng, bytes_per_token=bpt,
-                       how="spills", frac_cpu=frac_cpu)
+            out.update(ttft=max(prompt / pp, compute), tps=plain, tps_range=None if sys_bw else rng, range_how=how_rng,
+                       bytes_per_token=bpt, how="spills", frac_cpu=frac_cpu, measured=bool(sys_bw))
     else:
         out.update(ttft=None, tps=None, tps_range=None, bytes_per_token=None, how="does not fit")
     return out
@@ -490,9 +494,16 @@ def fmt_s(x):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Which local-inference box your workload stalls on.")
     ap.add_argument("config", help="the model's config.json")
-    ap.add_argument("log", help="Ollama, llama.cpp or mlx_lm log from the machine you run today")
+    ap.add_argument("log", nargs="?", help="Ollama, llama.cpp or mlx_lm log from the machine you run today "
+                    "(leave it out and pass --prompt and --gen if you have no local machine yet)")
     ap.add_argument("--only", default="", help="comma list of boxes: 5090,pro6000,m5max,m5ultra,spark,spark64")
     ap.add_argument("--quant", default="", help="override: " + ", ".join(PRESETS))
+    ap.add_argument("--prompt", type=float, default=None,
+                    help="prompt tokens on a typical request; with no log, the workload itself")
+    ap.add_argument("--gen", type=float, default=None, help="generated tokens on a typical request")
+    ap.add_argument("--cpu-tps", type=float, default=None,
+                    help="tokens/s this model decodes on your own CPU alone (llama-bench -m model.gguf -ngl 0 -p 0 "
+                         "-n 128): a box that spills gets one number from your RAM and CPU instead of a range")
     ap.add_argument("--requests-per-day", type=float, default=None)
     ap.add_argument("--cached", type=float, default=None,
                     help="tokens already in context from the prefix cache on a typical request (llama.cpp and "
@@ -509,10 +520,18 @@ def main(argv=None):
         model = Model(cfg, name=_get(cfg, "_name_or_path", default=a.config))
     except (OSError, ValueError) as e:
         sys.exit("boxfit: cannot read %s as a model's config.json: %s" % (a.config, e))
-    if not os.path.isfile(a.log):
+    # 2026-10-27: a reader who runs the model only through an API today has no local log; the
+    # typical request's token counts are the whole workload boxfit needs to size a box
+    if a.log is None:
+        if a.prompt is None or a.gen is None:
+            sys.exit("boxfit: give a log from the machine you run today, or --prompt and --gen for a typical request")
+        w = Workload()
+        w.add(prompt=a.prompt, gen=a.gen)
+    elif not os.path.isfile(a.log):
         sys.exit("boxfit: no log at %s" % a.log)
-    with open(a.log, encoding="utf-8", errors="replace") as fh:
-        w = parse_log(fh.read())
+    else:
+        with open(a.log, encoding="utf-8", errors="replace") as fh:
+            w = parse_log(fh.read())
     if not w.requests:
         sys.exit("boxfit: no request timings found in the log (Ollama --verbose, llama.cpp timings, or mlx_lm --verbose)")
 
@@ -543,24 +562,29 @@ def main(argv=None):
         scale = w.file_bytes / est if est else 1.0
 
     reqs = w.requests
-    prompt = statistics.median(r["prompt"] for r in reqs)
-    gen = statistics.median(r["gen"] for r in reqs)
+    prompt = a.prompt if a.prompt is not None else statistics.median(r["prompt"] for r in reqs)
+    gen = a.gen if a.gen is not None else statistics.median(r["gen"] for r in reqs)
     cached = a.cached if a.cached is not None else statistics.median(r.get("cached", 0.0) for r in reqs)
     if a.requests_per_day:
         per_day, per_day_note = a.requests_per_day, "--requests-per-day"
     elif len(w.times) >= 2:
         span = max((max(w.times) - min(w.times)).total_seconds() / 86400, 1.0)
         per_day, per_day_note = len(w.times) / span, "log timestamps"
+    elif a.log is None:
+        per_day, per_day_note = 1.0, "assumed; set --requests-per-day"
     else:
         per_day, per_day_note = float(len(reqs)), "assumed the log is one day; set --requests-per-day"
 
     cal = calibrate()
+    # 2026-10-27: a CPU-only decode reads every active byte from system memory, so its tokens/s
+    # times the bytes read per token is what this reader's RAM and CPU deliver to a spill
+    sys_bw = a.cpu_tps * bytes_per_token(model, bits, 0, scale) if a.cpu_tps else None
     keys = [k.strip() for k in a.only.split(",") if k.strip()] or list(BOXES)
     rows = []
     for k in keys:
         if k not in BOXES:
             sys.exit("boxfit: unknown box %r (choose from %s)" % (k, ", ".join(BOXES)))
-        o = predict(model, bits, scale, prompt, gen, cal, k, cached)
+        o = predict(model, bits, scale, prompt, gen, cal, k, cached, sys_bw)
         o["year"] = yearly(o, gen, per_day, a.years, a.kwh)
         rows.append(o)
 
@@ -577,8 +601,13 @@ def main(argv=None):
         VERSION, model.name, model.total_params / 1e9, model.active_params / 1e9, moe,
         bytes_per_token(model, bits, 0, scale) / GB))
     print("quantization: %s%s" % (why, " (scaled x%.3f to the log's file size)" % scale if abs(scale - 1) > 0.005 else ""))
-    print("workload: %d request(s) in the log, median %s prompt tokens and %s generated; %.0f a day (%s)" % (
-        len(reqs), "{:,}".format(int(prompt)), "{:,}".format(int(gen)), per_day, per_day_note))
+    if a.log is None:
+        print("workload: %s prompt tokens and %s generated per request (--prompt, --gen); %.0f a day (%s)" % (
+            "{:,}".format(int(prompt)), "{:,}".format(int(gen)), per_day, per_day_note))
+    else:
+        print("workload: %d request(s) in the log, median %s prompt tokens and %s generated; %.0f a day (%s)%s" % (
+            len(reqs), "{:,}".format(int(prompt)), "{:,}".format(int(gen)), per_day, per_day_note,
+            "; --prompt/--gen override the log" if a.prompt is not None or a.gen is not None else ""))
     if cached:
         print("prefix cache: %s tokens already in context on a typical request; the read skips them, memory "
               "and decode carry them" % "{:,}".format(int(cached)))
@@ -595,6 +624,8 @@ def main(argv=None):
         money = lambda v: "{:,}".format(int(round(v, -1)))
         if o["how"] == "spills" and o.get("tps_hi"):
             tps = "%.1f-%.1f" % (o["tps"], o["tps_hi"])
+        elif o["how"] == "spills" and o.get("measured"):
+            tps = "%.1f" % o["tps"]
         elif o["how"] == "spills":
             tps = "%.1f (%.0f-%.0f)" % (o["tps"], o["tps_range"][0], o["tps_range"][1]) if o["tps_range"][1] >= 10 else "%.1f (to %.1f)" % (o["tps"], o["tps_range"][1])
         else:
@@ -607,7 +638,14 @@ def main(argv=None):
         print("%-*s %-13s %-13s %-12s %-14s %-12s" % (w, name, fits, fmt_s(o["ttft"]), tps, own, rent))
     print()
     for o in rows:
-        if o["how"] == "spills" and o.get("tps_hi"):
+        if o["how"] == "spills" and o.get("measured") and o["range_how"] == "experts offloaded":
+            print("does not fit: %s needs %.0fGB and holds %.0f, so the experts go to system memory: %.1f tokens/s on your RAM and CPU" % (
+                o["name"], o["need_gb"], o["usable_gb"], o["tps"]))
+            print("  do not run a plain layer split: it spills to %.1f tokens/s" % o["plain"])
+        elif o["how"] == "spills" and o.get("measured"):
+            print("does not fit: %s needs %.0fGB and holds %.0f, so it spills to %.1f tokens/s on your RAM and CPU" % (
+                o["name"], o["need_gb"], o["usable_gb"], o["tps"]))
+        elif o["how"] == "spills" and o.get("tps_hi"):
             print("does not fit: %s needs %.0fGB and holds %.0f, so the experts go to system memory: %.1f to %.1f tokens/s, set by your system RAM and CPU" % (
                 o["name"], o["need_gb"], o["usable_gb"], o["tps"], o["tps_hi"]))
             print("  do not run a plain layer split: it spills to %.1f tokens/s" % o["plain"])
@@ -619,7 +657,10 @@ def main(argv=None):
             print("does not fit: %s needs %.0fGB and holds %.0f" % (o["name"], o["need_gb"], o["usable_gb"]))
     print("fits: weights + KV cache at %s tokens + %.1f GB buffers, against memory the box gives the GPU by default" % (
         "{:,}".format(int(cached + prompt + gen)), OVERHEAD_GB))
-    if any(o["how"] == "spills" and o.get("tps_hi") for o in rows):
+    if any(o["how"] == "spills" and o.get("measured") for o in rows):
+        print("spills: system memory at %.0f GB/s, from your CPU-only %.1f tokens/s x %.2f GB read per token (--cpu-tps)" % (
+            sys_bw / GB, a.cpu_tps, bytes_per_token(model, bits, 0, scale) / GB))
+    elif any(o["how"] == "spills" and o.get("tps_hi") for o in rows):
         print("spills: experts offloaded with llama.cpp --n-cpu-moe; on this model one RTX 5090 host measured 8.1 tokens/s and a faster one 30")
     elif any(o["how"] == "spills" for o in rows):
         print("spills: plain layer split on the host that ran 3.4 tokens/s, with the range a faster host or --n-cpu-moe reaches")

@@ -577,7 +577,8 @@ def main(argv=None):
         gt = statistics.median(r["gen_tps"] for r in today)
         print("your machine today: %s to first token, %.1f tokens per second" % (fmt_s(prompt / pt), gt))
     print()
-    print("%-26s %-13s %-13s %-12s %-10s %-10s" % ("box", "fits", "first token", "tokens/s", "own/yr", "rent/yr"))
+    w = max(26, max(len(o["name"]) + (2 if o["projected"] else 0) for o in rows))
+    print("%-*s %-13s %-13s %-12s %-10s %-10s" % (w, "box", "fits", "first token", "tokens/s", "own/yr", "rent/yr"))
     for o in rows:
         y = o["year"]
         fits = o["fits"] if o["fits"] != "no" else "no (%.0fGB)" % o["need_gb"]
@@ -588,7 +589,7 @@ def main(argv=None):
         name = o["name"] + (" *" if o["projected"] else "")
         own = "$%s" % "{:,}".format(int(round(y["own"], -1))) if y else "-"
         rent = "$%s" % "{:,}".format(int(round(y["rent"], -1))) if (y and y["rent"] is not None) else "-"
-        print("%-26s %-13s %-13s %-12s %-10s %-10s" % (name, fits, fmt_s(o["ttft"]), tps, own, rent))
+        print("%-*s %-13s %-13s %-12s %-10s %-10s" % (w, name, fits, fmt_s(o["ttft"]), tps, own, rent))
     print()
     for o in rows:
         if o["how"] == "spills":
